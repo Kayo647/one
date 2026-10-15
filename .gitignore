@@ -29,3 +29,7 @@ npm-debug.log*
 
 # 本地备份（远端被覆盖时的还原点），不上传
 .remote-backup/
+
+# 本地凭据（绝不入库/上传）
+.gh-token.local
+*.local
