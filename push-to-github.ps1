@@ -56,25 +56,45 @@ foreach ($n in 'HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy'
 Write-Host "=== 4/5 connectivity probe (proxy off) ===" -ForegroundColor Cyan
 $probe = git -c http.proxy= -c https.proxy= ls-remote --heads origin 2>&1
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "  cannot reach GitHub." -ForegroundColor Red
+    Write-Host "  cannot reach GitHub with the proxy disabled." -ForegroundColor Red
     ($probe | Select-String 'fatal' | Select-Object -First 1) | ForEach-Object { Write-Host ("  " + $_.Line) }
-    Write-Host "  Check your network, or start the proxy app and retry." -ForegroundColor Yellow
-    Write-Host "  If your proxy works, point git at it instead:" -ForegroundColor Yellow
-    Write-Host "    git config --global http.proxy http://127.0.0.1:7897" -ForegroundColor Yellow
-    exit 1
+    Write-Host "  Your global config points at http://127.0.0.1:7897 -- make sure the proxy app is running," -ForegroundColor Yellow
+    Write-Host "  then simply re-run this script (it will then use the proxy, see below)." -ForegroundColor Yellow
+    # fall back to using the configured proxy explicitly
+    $probe = git -c http.proxy=http://127.0.0.1:7897 -c https.proxy=http://127.0.0.1:7897 ls-remote --heads origin 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  still unreachable. Check network / VPN." -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "  reachable via proxy 127.0.0.1:7897" -ForegroundColor Green
 }
-Write-Host "  reachable" -ForegroundColor Green
-if ($probe) {
-    Write-Host "  remote already has branches:" -ForegroundColor Yellow
-    $probe | Select-Object -First 5 | ForEach-Object { Write-Host ("    " + $_) }
+
+$remoteMain = (git -c http.proxy= -c https.proxy= ls-remote origin refs/heads/main 2>$null)
+$remoteSha = ''
+if ($remoteMain) { $remoteSha = ($remoteMain -split '\s+')[0] }
+if ($remoteSha) {
+    Write-Host ("  remote refs/heads/main = " + $remoteSha)
 } else {
-    Write-Host "  remote is empty (fresh repository) -- fine for a first push"
+    Write-Host "  remote has no main branch yet -- plain first push"
 }
 
 Write-Host "=== 5/5 pushing ===" -ForegroundColor Cyan
 Write-Host "  If a credential window appears: user = Kayo647, password = your Personal Access Token" -ForegroundColor Yellow
 Write-Host "  (a PAT with 'repo' scope; GitHub no longer accepts account passwords for push)" -ForegroundColor Yellow
-git -c http.proxy= -c https.proxy= -c credential.https://github.com.provider=manager push -u origin $branch
+
+# If the remote already exists with an unrelated history (e.g. GitHub's
+# auto-generated "Initial commit"), a plain push is rejected as non-fast-forward.
+# Use --force-with-lease pinned to the exact SHA we just read, so the push is
+# refused if anyone else changed the remote in the meantime.
+$pushArgs = @('-c','http.proxy=','-c','https.proxy=',
+              '-c','credential.https://github.com.provider=manager')
+if ($remoteSha) {
+    Write-Host "  remote history is unrelated -> using --force-with-lease (pinned to the SHA above)" -ForegroundColor Yellow
+    $pushArgs += @('push', '-u', 'origin', $branch, ('--force-with-lease=refs/heads/' + $branch + ':' + $remoteSha))
+} else {
+    $pushArgs += @('push', '-u', 'origin', $branch)
+}
+& git @pushArgs
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host ""
@@ -84,7 +104,6 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "Push failed. Common causes:" -ForegroundColor Red
     Write-Host "  - invalid or expired credential: create a new PAT"
     Write-Host "    (Settings -> Developer settings -> Personal access tokens)"
-    Write-Host "  - remote already has unrelated commits. If you are sure this is your own"
-    Write-Host "    new repo and you want to overwrite it, re-run the push with --force:"
-    Write-Host ("      git push -u origin " + $branch + " --force")
+    Write-Host "  - stale lease: the remote changed after the probe. Re-run this script."
+    Write-Host "  - if the PAT has no 'repo' scope, push to this private repo is refused."
 }
