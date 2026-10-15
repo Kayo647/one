@@ -101,9 +101,24 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "Push succeeded: https://github.com/Kayo647/one" -ForegroundColor Green
 } else {
     Write-Host ""
-    Write-Host "Push failed. Common causes:" -ForegroundColor Red
-    Write-Host "  - invalid or expired credential: create a new PAT"
-    Write-Host "    (Settings -> Developer settings -> Personal access tokens)"
-    Write-Host "  - stale lease: the remote changed after the probe. Re-run this script."
-    Write-Host "  - if the PAT has no 'repo' scope, push to this private repo is refused."
+    Write-Host "Push failed. Try these in order:" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  [1] Credential problems (wrong/expired token, or the popup was cancelled)" -ForegroundColor Yellow
+    Write-Host "      Create a new Personal Access Token: GitHub -> Settings -> Developer settings"
+    Write-Host "      -> Personal access tokens. Needs 'repo' scope (fine-grained: Contents = Read and write)."
+    Write-Host "      Windows may have cached a bad credential; remove it and re-run this script:"
+    Write-Host "        cmdkey /list | findstr github"
+    Write-Host "        cmdkey /delete:git:https://github.com"
+    Write-Host ""
+    Write-Host "  [2] Non-fast-forward (remote changed since the probe)" -ForegroundColor Yellow
+    Write-Host "      Re-run this script: it re-reads the remote SHA and retries the lease."
+    Write-Host "      To overwrite regardless (only if you are sure it is your own repo):"
+    Write-Host ("        git -c http.proxy=http://127.0.0.1:7897 -c https.proxy=http://127.0.0.1:7897 push -u origin " + $branch + " --force")
+    Write-Host ""
+    Write-Host "  [3] Network / proxy" -ForegroundColor Yellow
+    Write-Host "      Make sure the proxy app listening on 127.0.0.1:7897 is running."
+    Write-Host "      Probe without proxy: git -c http.proxy= -c https.proxy= ls-remote origin"
+    Write-Host ""
+    Write-Host "  [4] Still failing" -ForegroundColor Yellow
+    Write-Host "      Copy the full output above and send it for diagnosis."
 }
