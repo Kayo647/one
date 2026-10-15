@@ -119,6 +119,29 @@ node expcheck.mjs                               # 期望：OK 全部通过
 
 Kayo647 · 391999848@qq.com
 
+## 推送到 GitHub
+
+仓库地址：<https://github.com/Kayo647/one>
+
+本机存在两个会挡住推送的问题，本目录的 `push-to-github.ps1` 已一并处理：
+
+1. **全局 git 配置指向失效代理**：`http.proxy` / `https.proxy` 都设为
+   `http://127.0.0.1:7897`，而该端口无进程监听（代理软件未运行），
+   会让所有 git 网络操作失败。脚本仅对单条命令用 `git -c http.proxy=` 关闭代理，
+   **不改动全局配置**。
+2. **需要凭据**：GitHub 不支持账号密码推送，请在凭据弹窗里填写
+   Personal Access Token（需 `repo` 权限）。
+
+在项目根目录执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\push-to-github.ps1
+```
+
+若远端仓库尚未创建，先在 GitHub 网页端新建一个**空**仓库（不要勾选
+Add a README / .gitignore / license，避免与本地首次推送冲突），
+仓库名 `one`，然后运行上面的脚本。
+
 ## 许可
 
 本仓库未附带许可证文件。如需他人自由使用，建议补充 MIT 或 Apache-2.0 许可证；
