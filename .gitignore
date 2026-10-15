@@ -1,6 +1,7 @@
-# 忽略规则：只排除「生成的、可再生的、与本机绑定的」文件，源码与验证脚本一律入库
+# 忽略规则：只排除「生成的、可再生的、与本机绑定的」文件
+# 源码、验证脚本、文档一律入库
 
-# 浏览器/无头渲染产生的临时数据（我们在沙箱里试过 Chrome/Edge，会留下这些）
+# 浏览器/无头渲染产生的临时数据（沙箱里试过 Chrome/Edge，会留下这些）
 .cprof*/
 .eprof*/
 chrome-profile/
@@ -22,14 +23,15 @@ edge-profile/
 Thumbs.db
 desktop.ini
 
-# Node（本项目无依赖，仍留出位置，避免将来 node_modules 被误提交）
+# Node（本项目零依赖；留规则避免将来误提交）
 node_modules/
 package-lock.json
 npm-debug.log*
 
-# 本地备份（远端被覆盖时的还原点），不上传
+# 本地备份与还原点（不上传）
 .remote-backup/
+.remote-backup.zip
 
-# 本地凭据（绝不入库/上传）
+# 本地凭据（绝不入库/上传）——只匹配这一族名字，不用宽泛的 *.local
 .gh-token.local
-*.local
+*.token.local
