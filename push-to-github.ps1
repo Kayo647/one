@@ -1,124 +1,127 @@
 # push-to-github.ps1 -- push this repo to https://github.com/Kayo647/one
 #
-# Why this script exists (two traps on this machine):
-#   1. The GLOBAL git config points at a dead proxy:
-#        git config --global http.proxy  = http://127.0.0.1:7897
-#        git config --global https.proxy = http://127.0.0.1:7897
-#      Nothing listens on port 7897 (the proxy app is not running), so every
-#      git network operation fails. This script disables the proxy for its own
-#      git calls only (`git -c http.proxy=`), and does NOT touch your global config.
-#   2. The first push needs credentials. Use a Personal Access Token (PAT) in the
-#      credential popup. Never paste the token into this file or commit it.
+# Background (measured on this machine):
+#   * The GLOBAL git config points at a proxy: http://127.0.0.1:7897
+#     Direct connections to github.com time out here, but the proxy works
+#     (verified: ls-remote through it returns the remote SHA in ~2s).
+#     So this script uses the proxy FIRST and falls back to no proxy.
+#   * The first push needs credentials. Use a Personal Access Token (PAT):
+#     user = Kayo647, password = the token. GitHub rejects account passwords.
 #
-# Usage (run in the project root):
-#   powershell -ExecutionPolicy Bypass -File .\push-to-github.ps1
+# Everything is written to git-push.log in this folder, so you can read the
+# result even if the window closes.
 #
-# ASCII only on purpose: Windows PowerShell 5.1 reads .ps1 files as ANSI unless
-# they carry a UTF-8 BOM, which would corrupt non-ASCII text in this file.
+# ASCII only on purpose: Windows PowerShell 5.1 decodes .ps1 as ANSI unless the
+# file has a UTF-8 BOM, which would corrupt non-ASCII text.
 
-$ErrorActionPreference = 'Stop'
-$repoUrl = 'https://github.com/Kayo647/one.git'
+param(
+    [switch]$NoPause,
+    [switch]$Force
+)
 
-function Invoke-GitNoProxy {
-    # forward all args to git with proxy disabled for this invocation only
-    & git -c http.proxy= -c https.proxy= @args
-    return $LASTEXITCODE
+$ErrorActionPreference = 'Continue'
+$repoUrl  = 'https://github.com/Kayo647/one.git'
+$proxyUrl = 'http://127.0.0.1:7897'
+$logPath  = Join-Path (Get-Location) 'git-push.log'
+$branch   = 'main'
+
+function Log {
+    param([string]$Text, [string]$Color = 'Gray')
+    Write-Host $Text -ForegroundColor $Color
+    Add-Content -Path $logPath -Value $Text -Encoding UTF8
 }
 
-Write-Host "=== 1/5 checking local repo ===" -ForegroundColor Cyan
-if (-not (Test-Path .git)) { throw "Not a git repository. Run this from the project root." }
-if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw "git not found. Install Git for Windows first." }
-$branch = (git rev-parse --abbrev-ref HEAD).Trim()
-Write-Host ("  branch : " + $branch)
-Write-Host ("  head   : " + (git log -1 --format='%h %s'))
-Write-Host ("  author : " + (git log -1 --format='%an <%ae>'))
-if (git status --porcelain) { Write-Host "  note: working tree has uncommitted changes (they are not pushed)" -ForegroundColor Yellow }
+# fresh log for this run
+Set-Content -Path $logPath -Value ("=== push run " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + " ===") -Encoding UTF8
 
-Write-Host "=== 2/5 setting remote ===" -ForegroundColor Cyan
-$existing = (git remote get-url origin 2>$null)
-if ($existing) {
-    if ($existing.Trim() -ne $repoUrl) {
-        Write-Host ("  origin was " + $existing + ", updating to " + $repoUrl)
-        git remote set-url origin $repoUrl
-    } else {
-        Write-Host ("  origin already " + $repoUrl)
-    }
-} else {
-    git remote add origin $repoUrl
-    Write-Host ("  added origin -> " + $repoUrl)
-}
+try {
+    Log "=== 1/6 repository check ===" Cyan
+    if (-not (Test-Path .git)) { throw "Not a git repository. Run this from the project root." }
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw "git not found. Install Git for Windows first." }
+    $branch = (git rev-parse --abbrev-ref HEAD).Trim()
+    Log ("  branch : " + $branch)
+    Log ("  head   : " + (git log -1 --format='%h %s'))
+    Log ("  author : " + (git log -1 --format='%an <%ae>'))
+    if (git status --porcelain) { Log "  note: uncommitted changes exist (they will NOT be pushed)" Yellow }
 
-Write-Host "=== 3/5 clearing proxy env vars for this session ===" -ForegroundColor Cyan
-foreach ($n in 'HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy') {
-    if (Test-Path ("Env:" + $n)) { Remove-Item ("Env:" + $n); Write-Host ("  cleared " + $n) }
-}
+    Log "=== 2/6 remote ===" Cyan
+    $existing = (git remote get-url origin 2>$null)
+    if (-not $existing) { git remote add origin $repoUrl; Log ("  added origin -> " + $repoUrl) }
+    elseif ($existing.Trim() -ne $repoUrl) { git remote set-url origin $repoUrl; Log ("  origin set to " + $repoUrl) }
+    else { Log ("  origin already " + $repoUrl) }
 
-Write-Host "=== 4/5 connectivity probe (proxy off) ===" -ForegroundColor Cyan
-$probe = git -c http.proxy= -c https.proxy= ls-remote --heads origin 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "  cannot reach GitHub with the proxy disabled." -ForegroundColor Red
-    ($probe | Select-String 'fatal' | Select-Object -First 1) | ForEach-Object { Write-Host ("  " + $_.Line) }
-    Write-Host "  Your global config points at http://127.0.0.1:7897 -- make sure the proxy app is running," -ForegroundColor Yellow
-    Write-Host "  then simply re-run this script (it will then use the proxy, see below)." -ForegroundColor Yellow
-    # fall back to using the configured proxy explicitly
-    $probe = git -c http.proxy=http://127.0.0.1:7897 -c https.proxy=http://127.0.0.1:7897 ls-remote --heads origin 2>&1
+    Log "=== 3/6 connectivity (proxy first, then direct) ===" Cyan
+    $useProxy = $true
+    $probe = git -c http.proxy=$proxyUrl -c https.proxy=$proxyUrl ls-remote --heads origin 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "  still unreachable. Check network / VPN." -ForegroundColor Red
-        exit 1
+        Log "  via proxy failed:" Yellow
+        ($probe | Select-String 'fatal|error' | Select-Object -First 2) | ForEach-Object { Log ("    " + $_.Line.Trim()) }
+        Log "  trying without proxy..." Yellow
+        $useProxy = $false
+        $probe = git -c http.proxy= -c https.proxy= ls-remote --heads origin 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Log "  both routes failed:" Red
+            $probe | Select-Object -First 5 | ForEach-Object { Log ("    " + $_) }
+            throw "Cannot reach GitHub. Start the proxy app on 127.0.0.1:7897 and retry."
+        }
     }
-    Write-Host "  reachable via proxy 127.0.0.1:7897" -ForegroundColor Green
-}
+    Log ("  reachable (" + $(if ($useProxy) { 'via proxy 127.0.0.1:7897' } else { 'direct' }) + ")") Green
+    $remoteSha = ''
+    if ($probe) { $remoteSha = (($probe | Select-Object -First 1) -split '\s+')[0] }
+    Log ("  remote refs/heads/" + $branch + " = " + $(if ($remoteSha) { $remoteSha } else { '(empty)' }))
 
-$remoteMain = (git -c http.proxy= -c https.proxy= ls-remote origin refs/heads/main 2>$null)
-$remoteSha = ''
-if ($remoteMain) { $remoteSha = ($remoteMain -split '\s+')[0] }
-if ($remoteSha) {
-    Write-Host ("  remote refs/heads/main = " + $remoteSha)
-} else {
-    Write-Host "  remote has no main branch yet -- plain first push"
-}
+    Log "=== 4/6 proxy flags for the push ===" Cyan
+    if ($useProxy) { $px = @('-c', "http.proxy=$proxyUrl", '-c', "https.proxy=$proxyUrl") }
+    else           { $px = @('-c', 'http.proxy=', '-c', 'https.proxy=') }
+    Log ("  git " + ($px -join ' '))
 
-Write-Host "=== 5/5 pushing ===" -ForegroundColor Cyan
-Write-Host "  If a credential window appears: user = Kayo647, password = your Personal Access Token" -ForegroundColor Yellow
-Write-Host "  (a PAT with 'repo' scope; GitHub no longer accepts account passwords for push)" -ForegroundColor Yellow
+    Log "=== 5/6 push ===" Cyan
+    Log "  A credential window may appear. Enter:" Yellow
+    Log "    username = Kayo647"
+    Log "    password = your Personal Access Token (needs 'repo' scope)"
+    Log "  (GitHub no longer accepts your account password for push)" Yellow
 
-# If the remote already exists with an unrelated history (e.g. GitHub's
-# auto-generated "Initial commit"), a plain push is rejected as non-fast-forward.
-# Use --force-with-lease pinned to the exact SHA we just read, so the push is
-# refused if anyone else changed the remote in the meantime.
-$pushArgs = @('-c','http.proxy=','-c','https.proxy=',
-              '-c','credential.https://github.com.provider=manager')
-if ($remoteSha) {
-    Write-Host "  remote history is unrelated -> using --force-with-lease (pinned to the SHA above)" -ForegroundColor Yellow
-    $pushArgs += @('push', '-u', 'origin', $branch, ('--force-with-lease=refs/heads/' + $branch + ':' + $remoteSha))
-} else {
-    $pushArgs += @('push', '-u', 'origin', $branch)
-}
-& git @pushArgs
+    $pushArgs = @() + $px + @('-c', 'credential.https://github.com.provider=manager')
+    if ($remoteSha) {
+        Log ("  remote has an unrelated history -> using --force-with-lease pinned to " + $remoteSha) Yellow
+        $pushArgs += @('push', '-u', 'origin', $branch, ("--force-with-lease=refs/heads/" + $branch + ":" + $remoteSha))
+    } else {
+        $pushArgs += @('push', '-u', 'origin', $branch)
+    }
+    if ($Force) { $pushArgs += '--force'; Log "  -Force given: plain --force appended" Yellow }
 
-if ($LASTEXITCODE -eq 0) {
-    Write-Host ""
-    Write-Host "Push succeeded: https://github.com/Kayo647/one" -ForegroundColor Green
-} else {
-    Write-Host ""
-    Write-Host "Push failed. Try these in order:" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "  [1] Credential problems (wrong/expired token, or the popup was cancelled)" -ForegroundColor Yellow
-    Write-Host "      Create a new Personal Access Token: GitHub -> Settings -> Developer settings"
-    Write-Host "      -> Personal access tokens. Needs 'repo' scope (fine-grained: Contents = Read and write)."
-    Write-Host "      Windows may have cached a bad credential; remove it and re-run this script:"
-    Write-Host "        cmdkey /list | findstr github"
-    Write-Host "        cmdkey /delete:git:https://github.com"
-    Write-Host ""
-    Write-Host "  [2] Non-fast-forward (remote changed since the probe)" -ForegroundColor Yellow
-    Write-Host "      Re-run this script: it re-reads the remote SHA and retries the lease."
-    Write-Host "      To overwrite regardless (only if you are sure it is your own repo):"
-    Write-Host ("        git -c http.proxy=http://127.0.0.1:7897 -c https.proxy=http://127.0.0.1:7897 push -u origin " + $branch + " --force")
-    Write-Host ""
-    Write-Host "  [3] Network / proxy" -ForegroundColor Yellow
-    Write-Host "      Make sure the proxy app listening on 127.0.0.1:7897 is running."
-    Write-Host "      Probe without proxy: git -c http.proxy= -c https.proxy= ls-remote origin"
-    Write-Host ""
-    Write-Host "  [4] Still failing" -ForegroundColor Yellow
-    Write-Host "      Copy the full output above and send it for diagnosis."
+    Log ("  running: git " + ($pushArgs -join ' '))
+    $pushOut = & git @pushArgs 2>&1
+    $code = $LASTEXITCODE
+    $pushOut | ForEach-Object { Log ("    " + $_) }
+
+    Log "=== 6/6 result ===" Cyan
+    if ($code -eq 0) {
+        Log "PUSH SUCCEEDED -> https://github.com/Kayo647/one" Green
+        Log "Open the URL above; the README should render on the repository page." Green
+    } else {
+        Log ("PUSH FAILED (git exit " + $code + ")") Red
+        Log "" 
+        Log "What to do next:" Yellow
+        Log "  [a] Credential rejected / cancelled:"
+        Log "      create a token at GitHub -> Settings -> Developer settings"
+        Log "      -> Personal access tokens. Scope 'repo' (fine-grained: Contents = Read and write)."
+        Log "      then clear any cached bad credential and retry:"
+        Log "        cmdkey /list | findstr github"
+        Log "        cmdkey /delete:git:https://github.com"
+        Log "  [b] Non-fast-forward:"
+        Log "      retry once (remote SHA is re-read each run), or force:"
+        Log ("        git -c http.proxy=" + $proxyUrl + " -c https.proxy=" + $proxyUrl + " push -u origin " + $branch + " --force")
+        Log "  [c] Send me the whole git-push.log (it contains this same text)."
+    }
+} catch {
+    Log ("ERROR: " + $_.Exception.Message) Red
+    Log "See git-push.log for the full transcript." Yellow
+} finally {
+    Log ""
+    Log ("Log file: " + $logPath)
+    if (-not $NoPause) {
+        Write-Host ""
+        Read-Host "Press Enter to close"
+    }
 }
