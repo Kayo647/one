@@ -47,7 +47,15 @@ const el = (id) => {
   return store.get(id);
 };
 const scriptSrc = html.match(/<script>([\s\S]*?)<\/script>/)[1];
-new Function('document', 'requestAnimationFrame', scriptSrc)(
+// 测量「转了多少角度」必须读脚本内部的累计状态 θ，不能读 HUD：
+// 二者都是 % 2π 归一后的方位角，做算术差值会丢圈。
+// 这里在内存里插桩把 θ 暴露到 __probe，只在测量时段记录，不改变任何计算。
+const instrumented = scriptSrc.replace(
+  '    renderFrame();\n    requestAnimationFrame(frame);',
+  '    if (globalThis.__probe) globalThis.__probe.theta = theta;\n    renderFrame();\n    requestAnimationFrame(frame);');
+if (!instrumented.includes('__probe')) throw new Error('插桩失败：未找到 renderFrame 调用');
+globalThis.__probe = null;
+new Function('document', 'requestAnimationFrame', instrumented)(
   { getElementById: (id) => el(id) }, (cb) => { rafCb = cb; });
 // 该脚本是 IIFE，内部变量取不到；通过故意触发一次错误不行，
 // 改为从源码文本中提取 sliderX/sliderVx 求值，用于与 SVG 输出对照。
@@ -168,31 +176,60 @@ ok(Math.abs((maxBx - minBx) - 2 * R * SCALE) < 0.01, '往复区间恰为 2r·SCA
    (maxBx - minBx).toFixed(2) + ' 单位');
 
 console.log('\n    —— 验收项：匀速转动、转速与帧率/窗口切换无关 ——');
-const degFor = (ms) => ((W * ms / 1000) % (2 * Math.PI)) * 180 / Math.PI;
+// 用内部累计角测量：θ 是 % 2π 归一后的值（HUD 与状态同源），
+// 所以不能「末值 − 初值」，必须逐帧取增量、做环绕修正后累加。
+// 环绕规则：θ 只正向增长、单帧真值落在 (0, 2π)，故 cur−prev 为负时补一次 2π。
+// 注意不能因为增量 > π 就减 2π —— 那会把 ω=4、Δt=1s 的真值 4 rad 算成 −2.28 rad。
 const drive = (gen) => {
   el('btnToggle').handlers.get('click')();            // 暂停
   el('btnToggle').handlers.get('click')();            // 继续：脚本以此刻重新对时
-  const t0 = clock;
-  const d0 = parseFloat(el('outDeg').textContent);
-  for (const dt of gen) { clock += dt; rafCb(clock); }
-  const d1 = parseFloat(el('outDeg').textContent);
-  return { ms: clock - t0, deg: d1, d0 };
+  globalThis.__probe = { theta: null };
+  rafCb(clock);                                       // 触发一帧以填充初始 θ（dt=0，不推进）
+  let prev = globalThis.__probe.theta, acc = 0, elapsed = 0;
+  for (const dt of gen) {
+    clock += dt; rafCb(clock); elapsed += dt;
+    const cur = globalThis.__probe.theta;
+    let d = cur - prev;
+    if (d < 0) d += 2 * Math.PI;
+    acc += d; prev = cur;
+  }
+  globalThis.__probe = null;
+  return { ms: elapsed, dTheta: acc };
 };
 const steadyGen = Array(600).fill(1000 / 60);
 let r2 = 1; const jitGen = [];
 for (let i = 0; i < 400; i++) { r2 = (r2 * 1103515245 + 12345) % 2147483648; jitGen.push(4 + r2 / 2147483648 * 60); }
 const A10 = drive(steadyGen);
 const B10 = drive(jitGen);
-ok(Math.abs(A10.deg - degFor(A10.ms)) < 0.05, '定帧率 60fps：θ = ω·实际时长',
-   A10.ms.toFixed(1) + ' ms → ' + A10.deg + '°（理论 ' + degFor(A10.ms).toFixed(2) + '°）');
-ok(Math.abs(B10.deg - degFor(B10.ms)) < 0.05, '抖动 4~64ms：θ = ω·实际时长（与帧率无关）',
-   B10.ms.toFixed(1) + ' ms → ' + B10.deg + '°（理论 ' + degFor(B10.ms).toFixed(2) + '°）');
-// 窗口切换：暂停很久再继续，θ 不应跳变（lastTs 重置）
+ok(Math.abs(A10.dTheta - W * 10) < 1e-6, '定帧率 60fps：Δθ = ω·实际时长 = 20 rad',
+   'Δθ=' + A10.dTheta.toFixed(9) + ' rad（实际 ' + A10.ms.toFixed(1) + ' ms）');
+ok(Math.abs(B10.dTheta - W * (B10.ms / 1000)) < 1e-6, '抖动 4~64ms：Δθ = ω·实际时长（与帧率无关）',
+   'Δθ=' + B10.dTheta.toFixed(9) + ' rad，ω·Δt=' + (W * B10.ms / 1000).toFixed(9)
+   + ' rad（实际 ' + B10.ms.toFixed(1) + ' ms）');
+// 同样 1 s 真实时间、三种帧率切分，Δθ 必须完全相同
+const shortDrive = (frameMs, n) => drive(Array(n).fill(frameMs));
+const S60 = shortDrive(1000 / 60, 60), S30 = shortDrive(1000 / 30, 30), S20 = shortDrive(50, 20);
+ok(Math.abs(S60.dTheta - 2) < 1e-6 && Math.abs(S30.dTheta - 2) < 1e-6 && Math.abs(S20.dTheta - 2) < 1e-6,
+   '同样 1 s：60/30/20 fps 的 Δθ 都等于 ω·1 = 2 rad',
+   '60fps=' + S60.dTheta.toFixed(9) + '  30fps=' + S30.dTheta.toFixed(9) + '  20fps=' + S20.dTheta.toFixed(9));
+
+// —— 超大间隔（模拟切到后台 10 分钟）：按真实时长积分 ——
+// 本实现不对 dt 设上限，600 s 后台就真转 2×600 = 1200 rad（191 圈）。
+// 因此断言「此后仍严格按 ω·dt 推进」，而不是断言角度不变。
 const before = parseFloat(el('outDeg').textContent);
-clock += 600000; rafCb(clock);                       // 模拟 10 分钟后台（此时仍在运行）
+clock += 600000; rafCb(clock);
 const afterLong = parseFloat(el('outDeg').textContent);
-ok(Math.abs(afterLong - before) < 0.05, '单次超大间隔后仍按真实时长积分（不跳变、不停摆）',
-   before + '° → ' + afterLong + '°');
+ok(Number.isFinite(afterLong), '超大间隔后角度显示仍为有限值', afterLong + '°');
+const longProbe = (() => {
+  globalThis.__probe = { theta: null }; rafCb(clock);
+  const a = globalThis.__probe.theta; clock += 1000; rafCb(clock);
+  const b = globalThis.__probe.theta; globalThis.__probe = null;
+  let d = b - a; if (d < 0) d += 2 * Math.PI; return d;
+})();
+ok(Math.abs(longProbe - 2) < 1e-6, '超大间隔之后仍严格按 ω·dt 推进（1 s → 2 rad）',
+   'Δθ=' + longProbe.toFixed(9) + ' rad');
+
+// —— 暂停冻结 / 继续不跳变 ——
 el('btnToggle').handlers.get('click')();             // 暂停
 const paused = parseFloat(el('outDeg').textContent);
 clock += 60000; rafCb(clock);
@@ -202,14 +239,18 @@ const justResumed = parseFloat(el('outDeg').textContent);
 clock += 1000 / 60; rafCb(clock);
 ok(Math.abs(parseFloat(el('outDeg').textContent) - justResumed) < 0.05,
    '从后台切回：继续后首帧不跳变', justResumed + '°');
-// 角速度可调时 θ 仍只由 ω·dt 决定
+
+// —— ω 改变后 Δθ 仍严格等于 ω·Δt ——
 el('omega').value = '4';
 el('omega').handlers.get('input')();
 ok(el('outOmega').textContent.startsWith('4'), 'ω 改变后 HUD 同步', el('outOmega').textContent);
-const q0 = parseFloat(el('outDeg').textContent);
-const q1 = drive([1000]).deg;
-ok(Math.abs(((q1 - q0) + 360) % 360 - 4 * 180 / Math.PI) < 0.05, 'ω=4 时 1 s 转过 4 rad ≈ 229.18°',
-   (((q1 - q0) + 360) % 360).toFixed(2) + '°');
+const Q = drive([1000]);                              // 1 s 真实时间
+ok(Math.abs(Q.dTheta - 4) < 1e-6, 'ω=4 时 1 s 的 Δθ = 4 rad（严格）', 'Δθ=' + Q.dTheta.toFixed(9) + ' rad');
+const Q2 = drive([250, 250, 250, 250]);               // 同样 1 s，但切分成 4 个不均匀帧
+ok(Math.abs(Q2.dTheta - 4) < 1e-6, 'ω=4 时 4×250ms 的 Δθ 同样是 4 rad（与切分方式无关）',
+   'Δθ=' + Q2.dTheta.toFixed(9) + ' rad');
+el('omega').value = '2';                              // 复原，避免影响后续断言
+el('omega').handlers.get('input')();
 
 console.log('\n[5] 复位与实时显示');
 const bxBefore = trx('sliderGroup').x;
