@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>曲柄滑块机构 · 运动仿真</title>
+<style>
+  :root{
+    --bg:#0f1522; --panel:#182033; --line:#2b3550; --line2:#2b3550;
+    --txt:#e8eef8; --muted:#8fa0bd; --crank:#ff9f43; --rod:#4ecdc4;
+    --slider:#a78bfa; --pin:#ff6b81; --ref:#4a5a7a;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; min-height:100vh; background:radial-gradient(900px 600px at 20% 0%,#182238,#0b101a 70%);
+    color:var(--txt); font:14px/1.5 "Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+    display:flex; justify-content:center; padding:22px 16px 34px;
+  }
+  .app{width:100%; max-width:1000px}
+  h1{margin:0 0 2px; font-size:19px; letter-spacing:.5px}
+  .sub{color:var(--muted); font-size:12.5px; margin-bottom:14px}
+  .stage{background:var(--panel); border:1px solid var(--line2); border-radius:14px; overflow:hidden;
+         box-shadow:0 12px 34px rgba(0,0,0,.35)}
+  svg{display:block; width:100%; height:auto}
+
+  .hud{display:flex; flex-wrap:wrap; gap:10px; margin:14px 0}
+  .card{flex:1 1 150px; background:var(--panel); border:1px solid var(--line2); border-radius:11px; padding:9px 12px}
+  .card .k{color:var(--muted); font-size:11.5px; letter-spacing:.3px}
+  .card .v{font:600 20px/1.25 "Consolas",ui-monospace,monospace; font-variant-numeric:tabular-nums}
+  .card.hl .v{color:var(--crank)}
+
+  .ctrl{display:flex; flex-wrap:wrap; align-items:center; gap:12px;
+        background:var(--panel); border:1px solid var(--line2); border-radius:12px; padding:11px 14px}
+  button{
+    background:#233151; color:var(--txt); border:1px solid #33456b;
+    border-radius:8px; padding:7px 15px; font:600 13px/1 inherit; cursor:pointer; transition:.15s
+  }
+  button:hover{background:#2c3d63; border-color:#41598b}
+  button:active{transform:translateY(1px)}
+  label.sp{display:flex; align-items:center; gap:9px; color:var(--muted); font-size:12.5px; white-space:nowrap}
+  input[type=range]{width:190px; accent-color:var(--crank)}
+  .val{font:600 13px/1 "Consolas",monospace; color:var(--crank); min-width:82px}
+  .note{margin-top:12px; color:var(--muted); font-size:12px}
+  code{background:#1d2740; padding:2px 6px; border-radius:5px; color:#bcd0f0}
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>曲柄滑块机构 · 运动仿真</h1>
+  <div class="sub">
+    曲柄半径 r = 30 mm　·　连杆长度 L = 60 mm　·　曲柄角速度 ω = 2 rad/s（逆时针匀速）　·　水平导轨通过回转中心 O
+  </div>
+
+  <div class="stage">
+    <!-- ===================== 内联 SVG ===================== -->
+    <svg id="stage" viewBox="0 0 900 420" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="sliderGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#c4b5fd"/><stop offset="1" stop-color="#7c5cf5"/>
+        </linearGradient>
+        <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+          <feGaussianBlur stdDeviation="3.4" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+      </defs>
+
+      <rect x="0" y="0" width="900" height="420" fill="#111a2b"/>
+
+      <!-- ① 机架与导轨（固定） -->
+      <g id="frame">
+        <line id="guideRail" x1="140" y1="280" x2="860" y2="280"
+              stroke="#4b5f88" stroke-width="13" stroke-linecap="round"/>
+        <line id="railSlot" x1="140" y1="280" x2="860" y2="280"
+              stroke="#101728" stroke-width="4" stroke-linecap="round"/>
+        <g id="bearing">
+          <circle cx="370" cy="280" r="19" fill="#16203a" stroke="#4b5f88" stroke-width="2"/>
+          <circle cx="370" cy="280" r="4.5" fill="#6d81a8"/>
+        </g>
+        <circle id="origin" cx="370" cy="280" r="3.6" fill="#8fa0bd"/>
+        <path d="M370 302 L370 340 L290 340" fill="none" stroke="#33456b" stroke-width="1.4" stroke-dasharray="6 5"/>
+        <!-- 行程标注：初值占位，启动时按 r/L 算出真实值写入 -->
+        <line id="strokeDim" x1="0" y1="340" x2="0" y2="340" stroke="#5a6f9c" stroke-width="1.2"/>
+        <line id="strokeTick1" x1="0" y1="333" x2="0" y2="347" stroke="#5a6f9c" stroke-width="1.2"/>
+        <line id="strokeTick2" x1="0" y1="333" x2="0" y2="347" stroke="#5a6f9c" stroke-width="1.2"/>
+        <text id="strokeTxt" x="0" y="332" fill="#6d81a8" font-size="12" text-anchor="middle"></text>
+        <text class="lbl" x="392" y="358" fill="#8fa0bd" font-size="13">机架 / 导轨（固定）</text>
+      </g>
+
+      <!-- ② 曲柄轨迹圆（参考虚线圆） -->
+      <circle id="crankCircle" cx="370" cy="280" r="120"
+              fill="none" stroke="#4a5a7a" stroke-width="1.6" stroke-dasharray="7 6"/>
+      <line id="radiusMark" x1="370" y1="280" x2="490" y2="280" stroke="#4a5a7a" stroke-width="1" stroke-dasharray="3 4"/>
+      <text class="lbl" x="496" y="274" fill="#6d81a8" font-size="12">r = 30</text>
+
+      <!-- ③④⑥ 运动杆组：曲柄 + 连杆 + 铰点 A（每帧仅更新端点与 transform） -->
+      <g id="linkage">
+        <!-- ③ 曲柄：圆心 → 铰点 A -->
+        <line id="crank" x1="370" y1="280" x2="490" y2="280"
+              stroke="#ff9f43" stroke-width="11" stroke-linecap="round"/>
+        <!-- ④ 连杆：铰点 A → 铰点 B -->
+        <line id="rod" x1="490" y1="280" x2="730" y2="280"
+              stroke="#4ecdc4" stroke-width="8" stroke-linecap="round"/>
+        <!-- ⑥ 铰点 A -->
+        <circle id="pinA" cx="490" cy="280" r="7.5" fill="#ff6b81" stroke="#111a2b" stroke-width="2.4"/>
+      </g>
+
+      <!-- ⑤ 滑块 + ⑥ 铰点 B（同一平移，保证永不脱开）；初始位形对应 θ=0 -->
+      <g id="sliderGroup" transform="translate(730,280)">
+        <rect id="slider" x="-30" y="-22" width="60" height="44" rx="9"
+              fill="url(#sliderGrad)" stroke="#d9ccff" stroke-width="1.6"/>
+        <line x1="-30" y1="-22" x2="-30" y2="22" stroke="#e6dcff" stroke-width="2" opacity=".55"/>
+        <circle id="pinB" cx="0" cy="0" r="8.5" fill="#ff6b81" stroke="#111a2b" stroke-width="2.6" filter="url(#glow)"/>
+      </g>
+    </svg>
+  </div>
+
+  <!-- 实时数据显示 -->
+  <div class="hud">
+    <div class="card hl"><div class="k">曲柄转角 θ（角度制）</div><div class="v" id="outDeg">0.0°</div></div>
+    <div class="card"><div class="k">曲柄转角 θ（弧度制）</div><div class="v" id="outRad">0.000 rad</div></div>
+    <div class="card"><div class="k">滑块位移 x(θ)</div><div class="v" id="outX">90.0 mm</div></div>
+    <div class="card"><div class="k">滑块速度 dx/dt</div><div class="v" id="outV">0.0 mm/s</div></div>
+    <div class="card"><div class="k">连杆摆角 β</div><div class="v" id="outBeta">0.0°</div></div>
+    <div class="card"><div class="k">几何闭合残差 ‖AB‖−L</div><div class="v" id="outClosure">0.0e+0 mm</div></div>
+    <div class="card"><div class="k">传动角 γ（连杆⊥导轨=90° 最佳）</div><div class="v" id="outGamma">90.0°</div></div>
+  </div>
+
+  <div class="ctrl">
+    <button id="btnToggle">暂停</button>
+    <button id="btnReset">复位 θ = 0</button>
+    <label class="sp">ω <input id="omega" type="range" min="0.25" max="8" step="0.25" value="2">
+      <span class="val" id="outOmega">2.00 rad/s</span></label>
+  </div>
+
+  <div class="note">
+    运动学模型：<code>x(θ) = r·cosθ + √(L² − r²·sin²θ)</code>，代码中集中于 <code>sliderX(theta, r, L)</code>，
+    动画每帧只调用它；θ 由 <code>θ += ω·dt</code>（dt 取自 requestAnimationFrame 时间戳差值）积分得到，
+    与帧率、窗口切换无关。
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ============ 1. 几何参数（mm / rad/s） ============ */
+  const R = 30;      // 曲柄半径 r
+  const L = 60;      // 连杆长度 L   （L = 2r：可行域边界，√(L²−r²sin²θ) ≥ 30√3 > 0，全程有解）
+  const W0 = 2.0;    // 曲柄角速度 ω（标称值，逆时针匀速）
+  const SCALE = 4;   // 绘图放大系数：1 mm = 4 个 SVG 用户单位（纯显示，不参与运动学）
+
+  /* ============ 2. 运动学核心函数（公式唯一出处） ============ */
+  // 滑块位移：x(θ) = r·cosθ + √(L² − r²·sin²θ)
+  function sliderX(theta, r, L) {
+    return r * Math.cos(theta) + Math.sqrt(L * L - r * r * Math.sin(theta) * Math.sin(theta));
+  }
+  // 滑块速度：对 θ 求导 dx/dθ = −r·sinθ − r²·sinθ·cosθ / √(L² − r²sin²θ)
+  function sliderVx(theta, r, L) {
+    const s = Math.sin(theta), c = Math.cos(theta);
+    const root = Math.sqrt(L * L - r * r * s * s);
+    return -r * s - (r * r * s * c) / root;
+  }
+
+  /* ============ 3. 坐标系（O 为曲柄回转中心，位于导轨上） ============ */
+  const OX = 370, OY = 280;   // 回转中心 O 在 SVG 中的坐标；导轨即 y = OY
+  const RW = R * SCALE;       // 曲柄半径的用户单位长度
+  const LW = L * SCALE;       // 连杆长度的用户单位长度
+
+  /* ============ 4. 元素引用（只取一次，不每帧重建 DOM） ============ */
+  const $ = function (id) { return document.getElementById(id); };
+  const el = {
+    radiusMark: $('radiusMark'),
+    crank: $('crank'), rod: $('rod'), pinA: $('pinA'),
+    sliderGroup: $('sliderGroup'),
+    strokeDim: $('strokeDim'), strokeTick1: $('strokeTick1'),
+    strokeTick2: $('strokeTick2'), strokeTxt: $('strokeTxt'),
+    deg: $('outDeg'), rad: $('outRad'), x: $('outX'), v: $('outV'), beta: $('outBeta'),
+    closure: $('outClosure'), gamma: $('outGamma')
+  };
+
+  /* ============ 5. 状态 ============ */
+  let theta = 0;                 // 当前转角 θ（rad）
+  let omega = W0;                // 当前角速度 ω（rad/s）
+  let running = true;            // 是否运行中
+  let lastTs = null;             // 上一帧时间戳
+  const TWO_PI = Math.PI * 2;
+  const DEG = 180 / Math.PI;
+
+  /* ============ 6. 渲染：每帧只更新坐标 / transform ============ */
+  function renderFrame() {
+    const s = Math.sin(theta), c = Math.cos(theta);
+
+    // 铰点 A：曲柄端点
+    const ax = OX + RW * c, ay = OY - RW * s;
+
+    // 铰点 B：由唯一公式给出（换算到用户单位）→ 必在导轨 y = OY 上
+    const bx = OX + sliderX(theta, R, L) * SCALE;
+    const by = OY;
+
+    // ③ 曲柄：圆心 → A
+    el.crank.setAttribute('x2', ax.toFixed(3));
+    el.crank.setAttribute('y2', ay.toFixed(3));
+    // ④ 连杆：A → B（两端点各自钉在铰点上，运行中不会脱开）
+    el.rod.setAttribute('x1', ax.toFixed(3));
+    el.rod.setAttribute('y1', ay.toFixed(3));
+    el.rod.setAttribute('x2', bx.toFixed(3));
+    el.rod.setAttribute('y2', by.toFixed(3));
+    // ⑥ 铰点 A
+    el.pinA.setAttribute('cx', ax.toFixed(3));
+    el.pinA.setAttribute('cy', ay.toFixed(3));
+    // ⑤ 滑块 + ⑥ 铰点 B：整体平移（同一组 → 铰点 B 永远在滑块中心线上）
+    el.sliderGroup.setAttribute('transform', 'translate(' + bx.toFixed(3) + ',' + by.toFixed(3) + ')');
+
+    // 参考虚线 r 标记（仅示意，可省略）
+    el.radiusMark.setAttribute('x1', OX);
+    el.radiusMark.setAttribute('y1', OY);
+    el.radiusMark.setAttribute('x2', ax.toFixed(3));
+    el.radiusMark.setAttribute('y2', ay.toFixed(3));
+
+    // 实时数据
+    el.deg.textContent = (theta * DEG).toFixed(1) + '°';
+    el.rad.textContent = theta.toFixed(3) + ' rad';
+    el.x.textContent = sliderX(theta, R, L).toFixed(2) + ' mm';
+    el.v.textContent = (omega * sliderVx(theta, R, L)).toFixed(1) + ' mm/s';
+    const beta = Math.asin((R * s) / L) * DEG;   // 连杆摆角，仅显示用
+    el.beta.textContent = beta.toFixed(2) + '°';
+    // 闭合残差：直接量取屏幕上 A、B 的实际距离与名义杆长 L 比较（须恒为 0）
+    el.closure.textContent = (Math.hypot(bx - ax, by - ay) / SCALE - L).toExponential(1) + ' mm';
+    // 传动角 γ：连杆与滑块速度方向（导轨）的夹角，越接近 90° 传动越好
+    el.gamma.textContent = (90 - Math.abs(beta)).toFixed(2) + '°';
+  }
+
+  /* ============ 7. 动画驱动：rAF + 时间戳差值积分 ============ */
+  function frame(ts) {
+    if (lastTs === null) lastTs = ts;          // 首帧只对时，不积分
+    const dt = (ts - lastTs) / 1000;           // 秒；标签页切回时可能偏大
+    lastTs = ts;
+
+    if (running && dt > 0) {
+      // 逆时针匀速：θ += ω·dt   （dt 为真实经过时间，帧率变化不影响转速）
+      theta = (theta + omega * dt) % TWO_PI;
+      if (theta < 0) theta += TWO_PI;
+    }
+    renderFrame();
+    requestAnimationFrame(frame);
+  }
+
+  /* ============ 8. 交互 ============ */
+  const btnToggle = $('btnToggle'), btnReset = $('btnReset');
+  const omegaInput = $('omega'), outOmega = $('outOmega');
+
+  btnToggle.addEventListener('click', function () {
+    running = !running;
+    btnToggle.textContent = running ? '暂停' : '继续';
+    lastTs = null;                              // 恢复时重新对时，避免一次跳变
+  });
+
+  btnReset.addEventListener('click', function () {
+    theta = 0;
+    renderFrame();
+  });
+
+  omegaInput.addEventListener('input', function () {
+    const v = parseFloat(omegaInput.value);
+    omega = (isFinite(v) && v > 0) ? v : W0;
+    outOmega.textContent = omega.toFixed(2) + ' rad/s';
+  });
+
+  /* ============ 9. 启动 ============ */
+  // 行程标注（静态，只算一次）：x 的取值范围 [L−r, L+r]，总行程 = 2r = 2·RW
+  (function drawStrokeDim() {
+    const x0 = OX + (LW - RW), x1 = OX + (RW + LW), y = 340;
+    el.strokeDim.setAttribute('x1', x0); el.strokeDim.setAttribute('x2', x1);
+    el.strokeDim.setAttribute('y1', y);  el.strokeDim.setAttribute('y2', y);
+    el.strokeTick1.setAttribute('x1', x0); el.strokeTick1.setAttribute('x2', x0);
+    el.strokeTick2.setAttribute('x1', x1); el.strokeTick2.setAttribute('x2', x1);
+    el.strokeTxt.setAttribute('x', ((x0 + x1) / 2).toFixed(1));
+    el.strokeTxt.textContent = '行程 2r = ' + (2 * R) + ' mm';
+  })();
+  outOmega.textContent = omega.toFixed(2) + ' rad/s';
+  renderFrame();                                // 先画初始位形，避免首帧空白
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

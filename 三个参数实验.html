@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>三个参数实验 · x(θ) 曲线叠加对比</title>
+<style>
+  :root { --bg:#0f1420; --panel:#1a2233; --ink:#e8ecf4; --muted:#8b96ab; --grid:#263048; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px; background:var(--bg); color:var(--ink);
+    font-family:"Segoe UI","Microsoft YaHei",sans-serif; display:flex; flex-direction:column;
+    align-items:center; gap:16px; }
+  h1 { font-size:19px; margin:0; font-weight:600; }
+  h1 small { color:var(--muted); font-weight:400; font-size:13px; margin-left:10px; }
+  .card { background:var(--panel); border-radius:12px; padding:14px; box-shadow:0 4px 18px rgba(0,0,0,.35); }
+  table { border-collapse:collapse; font-size:13px; font-variant-numeric:tabular-nums; }
+  th, td { padding:6px 12px; border-bottom:1px solid #263048; text-align:right; }
+  th:first-child, td:first-child { text-align:left; }
+  th { color:var(--muted); font-weight:500; }
+  .sw { display:inline-block; width:22px; height:3px; border-radius:2px; vertical-align:middle; margin-right:6px; }
+  .note { color:var(--muted); font-size:13px; max-width:1000px; line-height:1.7; }
+  .note b { color:var(--ink); }
+  code { background:#1d2740; padding:1px 5px; border-radius:4px; color:#bcd0f0; }
+</style>
+</head>
+<body>
+
+<h1>三个参数实验 <small>x(θ) = r·cosθ + √(L² − r²·sin²θ) · 曲线叠加对比（θ 为横轴，同一几何刻度）</small></h1>
+
+<div class="card"><svg id="chart" width="960" height="470" viewBox="0 0 960 470"></svg></div>
+
+<div class="card">
+  <table id="tbl">
+    <thead><tr>
+      <th>实验</th><th>r</th><th>L</th><th>ω</th><th>L/r</th>
+      <th>行程 (mm)</th><th>x 范围 (mm)</th><th>中点 (mm)</th>
+      <th>二次谐波 a₂/a₁</th><th>峰值/平均速度</th><th>周期 (s)</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<div class="note">
+  <p><b>三条结论</b></p>
+  <p>• <b>实验 1（r: 30→50）</b>：曲线被<b>等比例拉高</b>，行程 60→100 mm（恰为 2r，1.667 倍），但形状只轻微变形（非简谐度 7.68%→13.39%），中点 x = L 不动。</p>
+  <p>• <b>实验 2（L: 100→32）</b>：行程<b>不变</b>仍是 60 mm，但曲线明显<b>歪斜</b>——往返两半程不再镜像，非简谐度猛增到 33.73%；滑块在最外端（θ≈0°）附近"爬行"，越过中点后急冲，峰值/平均速度 3.281→4.990。</p>
+  <p>• <b>实验 3（ω: 2→4）</b>：曲线<b>逐点重合</b>（行程差 0.000000 mm，谐波占比差 0.000000%），只是周期 3.142→1.571 s。x(θ) 里没有 ω。</p>
+  <p style="margin-top:10px">图中 <span class="sw" style="background:#8b96ab"></span>灰线为 A 组基准；实验 3 与基准完全重合（刻意画在最上层以便看见）。</p>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  // 与 crank-slider.html 中 sliderX 同一公式
+  function sliderX(theta, r, L) {
+    return r * Math.cos(theta) + Math.sqrt(L * L - r * r * Math.sin(theta) * Math.sin(theta));
+  }
+
+  const cases = [
+    { key: 'A', label: 'A 基准', r: 30, L: 100, w: 2, color: '#8b96ab', width: 2, dash: null },
+    { key: 'E1', label: '实验1 r=50', r: 50, L: 100, w: 2, color: '#ff6b6b', width: 3, dash: null },
+    { key: 'E2', label: '实验2 L=32', r: 30, L: 32, w: 2, color: '#7ee08a', width: 3, dash: null },
+    { key: 'E3', label: '实验3 ω=4', r: 30, L: 100, w: 4, color: '#ffb347', width: 3, dash: '7 5' }
+  ];
+
+  // 画布与刻度：横轴 θ∈[0,2π]，纵轴 x∈[0,160]（含全部四条曲线）
+  const PL = { x0: 70, x1: 930, yTop: 40, yBot: 400 };
+  const xMinView = 0, xMaxView = 160;
+  const px = (th) => PL.x0 + (PL.x1 - PL.x0) * th / (2 * Math.PI);
+  const py = (x) => PL.yBot - (PL.yBot - PL.yTop) * (x - xMinView) / (xMaxView - xMinView);
+
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.getElementById('chart');
+  const el = (tag, attrs, parent) => {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    (parent || svg).appendChild(e);
+    return e;
+  };
+
+  // 网格与坐标轴
+  const g = el('g', {});
+  for (let i = 0; i <= 8; i++) {
+    const th = 2 * Math.PI * i / 8, X = px(th);
+    el('line', { x1: X, y1: PL.yTop, x2: X, y2: PL.yBot, stroke: '#263048', 'stroke-width': 1 }, g);
+    const lbl = (i % 2 === 0) ? (i / 2) + 'π' : '';
+    if (lbl) el('text', { x: X - 8, y: PL.yBot + 20, fill: '#55637d', 'font-size': 12 }, g).textContent = lbl;
+  }
+  for (const v of [0, 32, 60, 100, 130, 160]) {
+    const Y = py(v);
+    el('line', { x1: PL.x0, y1: Y, x2: PL.x1, y2: Y,
+      stroke: v === 0 ? '#55637d' : '#263048', 'stroke-width': 1,
+      'stroke-dasharray': v === 0 ? null : '2 4' }, g);
+    el('text', { x: PL.x0 - 12, y: Y + 4, fill: '#55637d', 'font-size': 11, 'text-anchor': 'end' }, g)
+      .textContent = v;
+  }
+  el('text', { x: PL.x0 - 12, y: PL.yTop - 14, fill: '#8b96ab', 'font-size': 12, 'text-anchor': 'end' }, g)
+    .textContent = 'x (mm)';
+  el('text', { x: PL.x1, y: PL.yBot + 20, fill: '#8b96ab', 'font-size': 12, 'text-anchor': 'end' }, g)
+    .textContent = 'θ';
+
+  // 关键水平参考线：中点 x = L（基准 100、实验2 为 32）
+  for (const L of [100, 32]) {
+    el('line', { x1: PL.x0, y1: py(L), x2: PL.x1, y2: py(L),
+      stroke: L === 100 ? '#3a4a63' : '#2f5a3f', 'stroke-width': 1, 'stroke-dasharray': '6 4' }, g);
+    el('text', { x: PL.x1 - 4, y: py(L) - 6, fill: L === 100 ? '#6d81a8' : '#7ee08a',
+      'font-size': 11, 'text-anchor': 'end' }, g).textContent = '中点 x = L = ' + L;
+  }
+
+  // 曲线 + 图例
+  const legend = el('g', {});
+  cases.forEach((c, ci) => {
+    const N = 720;
+    let d = '';
+    for (let i = 0; i <= N; i++) {
+      const th = 2 * Math.PI * i / N;
+      const x = sliderX(th, c.r, c.L);
+      d += (i === 0 ? 'M' : 'L') + px(th).toFixed(1) + ',' + py(x).toFixed(1);
+    }
+    el('path', { d, fill: 'none', stroke: c.color, 'stroke-width': c.width,
+      'stroke-dasharray': c.dash, 'stroke-linejoin': 'round' });
+
+    const ly = 40 + ci * 22, lx = 760;
+    el('line', { x1: lx, y1: ly, x2: lx + 30, y2: ly, stroke: c.color,
+      'stroke-width': c.width, 'stroke-dasharray': c.dash }, legend);
+    el('text', { x: lx + 38, y: ly + 4, fill: '#e8ecf4', 'font-size': 13 }, legend)
+      .textContent = c.label + ' (r=' + c.r + ', L=' + c.L + ', ω=' + c.w + ')';
+  });
+
+  // 表格
+  const TAU = 2 * Math.PI;
+  const stats = (c) => {
+    const N = 72000;
+    let xMax = -Infinity, xMin = Infinity, sum = 0;
+    const xs = [];
+    for (let i = 0; i <= N; i++) {
+      const x = sliderX(TAU * i / N, c.r, c.L);
+      xs.push(x); xMax = Math.max(xMax, x); xMin = Math.min(xMin, x); sum += x;
+    }
+    const mean = sum / (N + 1);
+    let a1 = 0, b1 = 0, a2 = 0, b2 = 0;
+    for (let i = 0; i <= N; i++) {
+      const t = TAU * i / N, x = xs[i] - mean;
+      a1 += x * Math.cos(t); b1 += x * Math.sin(t);
+      a2 += x * Math.cos(2 * t); b2 += x * Math.sin(2 * t);
+    }
+    const A1 = 2 * Math.hypot(a1, b1) / (N + 1), A2 = 2 * Math.hypot(a2, b2) / (N + 1);
+    let vPeak = 0;
+    for (let i = 1; i < N; i++) {
+      const t = TAU * i / N, s = Math.sin(t), co = Math.cos(t);
+      const root = Math.sqrt(c.L * c.L - c.r * c.r * s * s);
+      vPeak = Math.max(vPeak, Math.abs(c.w * (-c.r * s - (c.r * c.r * s * co) / root)));
+    }
+    const stroke = xMax - xMin;
+    const vMean = stroke / (TAU / c.w);
+    return { xMax, xMin, stroke, mid: (xMax + xMin) / 2, mean, r2: A2 / A1,
+      ratio: vPeak / vMean, period: TAU / c.w };
+  };
+  const tb = document.querySelector('#tbl tbody');
+  cases.forEach((c) => {
+    const st = stats(c);
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td><span class="sw" style="background:' + c.color + '"></span>' + c.label + '</td>'
+      + '<td>' + c.r + '</td><td>' + c.L + '</td><td>' + c.w + '</td>'
+      + '<td>' + (c.L / c.r).toFixed(2) + '</td>'
+      + '<td>' + st.stroke.toFixed(1) + '</td>'
+      + '<td>[' + st.xMin.toFixed(1) + ', ' + st.xMax.toFixed(1) + ']</td>'
+      + '<td>' + st.mid.toFixed(1) + '</td>'
+      + '<td>' + (st.r2 * 100).toFixed(2) + '%</td>'
+      + '<td>' + st.ratio.toFixed(3) + '</td>'
+      + '<td>' + st.period.toFixed(3) + '</td>';
+    tb.appendChild(tr);
+  });
+})();
+</script>
+</body>
+</html>

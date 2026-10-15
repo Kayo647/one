@@ -1,0 +1,28 @@
+# 忽略规则：只排除「生成的、可再生的、与本机绑定的」文件，源码与验证脚本一律入库
+
+# 浏览器/无头渲染产生的临时数据（我们在沙箱里试过 Chrome/Edge，会留下这些）
+.cprof*/
+.eprof*/
+chrome-profile/
+edge-profile/
+*.tmp
+
+# 命令输出与临时转储
+/vardump.txt
+/out.txt
+/o1.txt
+/o2.txt
+/shot.png
+/*.log
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+
+# Node（本项目无依赖，仍留出位置，避免将来 node_modules 被误提交）
+node_modules/
+package-lock.json
+npm-debug.log*

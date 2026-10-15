@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>曲柄滑块机构仿真 · 修复版</title>
+<style>
+  :root {
+    --bg: #0f1420;
+    --panel: #1a2233;
+    --ink: #e8ecf4;
+    --muted: #8b96ab;
+    --accent: #4da3ff;
+    --warn: #ffb347;
+    --crank: #ff6b6b;
+    --rod: #4da3ff;
+    --slider: #7ee08a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    background: var(--bg); color: var(--ink);
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    display: flex; flex-direction: column; align-items: center; gap: 16px;
+  }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  h1 small { color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 10px; }
+  .stage { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; }
+  .card { background: var(--panel); border-radius: 12px; padding: 12px; box-shadow: 0 4px 18px rgba(0,0,0,.35); }
+  .card h2 { font-size: 13px; color: var(--muted); margin: 0 0 6px 4px; font-weight: 500; }
+  .controls {
+    display: flex; gap: 24px; flex-wrap: wrap; align-items: center;
+    background: var(--panel); border-radius: 12px; padding: 14px 20px;
+    max-width: 1060px; width: 100%;
+  }
+  .ctl { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .ctl label { color: var(--muted); min-width: 86px; }
+  .ctl output { min-width: 64px; font-variant-numeric: tabular-nums; color: var(--ink); }
+  input[type=range] { width: 140px; accent-color: var(--accent); }
+  button { background: var(--accent); color: #06121f; border: none; border-radius: 8px;
+    padding: 8px 18px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  .warn { color: var(--warn); font-size: 13px; min-height: 18px; width: 100%; }
+  svg { display: block; }
+  .formula { color: var(--muted); font-size: 13px; font-family: Consolas, monospace; }
+</style>
+</head>
+<body>
+
+<h1>曲柄滑块机构仿真 <small>Slider-Crank Mechanism · SVG + requestAnimationFrame</small></h1>
+
+<div class="controls">
+  <div class="ctl">
+    <label>曲柄半径 r</label>
+    <input id="inpR" type="range" min="10" max="60" step="1" value="30">
+    <output id="outR">30 mm</output>
+  </div>
+  <div class="ctl">
+    <label>连杆长度 L</label>
+    <input id="inpL" type="range" min="40" max="160" step="1" value="100">
+    <output id="outL">100 mm</output>
+  </div>
+  <div class="ctl">
+    <label>角速度 ω</label>
+    <input id="inpW" type="range" min="0.5" max="6" step="0.1" value="2">
+    <output id="outW">2.0 rad/s</output>
+  </div>
+  <button id="btnPlay">⏸ 暂停</button>
+  <button id="btnReset" class="ghost">↺ 复位 θ=0</button>
+  <div class="warn" id="warnMsg"></div>
+</div>
+
+<div class="stage">
+  <div class="card">
+    <h2>机构运动（θ 为曲柄转角，从 x 轴正方向起算）</h2>
+    <svg id="mech" width="640" height="420" viewBox="0 0 640 420"></svg>
+  </div>
+  <div class="card">
+    <h2>滑块位移 x(θ) 一个周期</h2>
+    <svg id="plot" width="400" height="420" viewBox="0 0 400 420"></svg>
+  </div>
+</div>
+
+<div class="formula">运动学模型：x(θ) = r·cosθ + √( L² − r²·sin²θ )，约束条件 L ≥ r + 5</div>
+
+<script>
+(function () {
+'use strict';
+
+// ===================== 参数与状态 =====================
+// 颜色用字面量：SVG 表现属性由浏览器按“CSS 值”解析，var() 在不同实现下支持不一致，
+// 这里直接给出最终颜色，避免整机线条失效（原版写 var(--crank) 等）。
+const C = {
+  crank: "#ff6b6b", rod: "#4da3ff", slider: "#7ee08a",
+  rail: "#55637d", trace: "#3a4a63", dead: "#ffb347",
+  ink: "#e8ecf4", muted: "#8b96ab", arc: "#e8ecf4", grid: "#263048"
+};
+const MIN_CLEARANCE = 5;                 // 装配约束 L ≥ r + 5
+
+const P = { r: 30, L: 100, w: 2.0 };     // r, L 单位 mm；w 单位 rad/s
+let theta = 0;                           // 曲柄转角 rad
+let running = true;
+let lastT = null;                        // 首帧只对时，不积分
+const MAX_DT = 0.05;                     // 单帧最大积分步长（防止切换窗口后跳变）
+
+// ===================== 运动学（唯一公式出处） =====================
+function sliderX(r, L, th) {
+  const under = L * L - (r * Math.sin(th)) ** 2;
+  if (under < 0) return { feasible: false, x: NaN };
+  return { feasible: true, x: r * Math.cos(th) + Math.sqrt(under) };
+}
+// 滑块速度 dx/dt = ω · dx/dθ
+function sliderVx(r, L, th) {
+  const s = Math.sin(th), c = Math.cos(th);
+  const root = Math.sqrt(L * L - r * r * s * s);
+  return -r * s - (r * r * s * c) / root;
+}
+
+// ===================== 工具 =====================
+const NS = "http://www.w3.org/2000/svg";
+const byId = (id) => document.getElementById(id);
+function el(tag, attrs, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+
+// ===================== 机构视图 =====================
+const mech = byId("mech");
+const OX = 180, OY = 250;                // 曲柄中心 O 的屏幕位置（固定）
+let S = 1.5;                             // 世界坐标 → 屏幕像素倍率（随参数自适应）
+
+const world = el("g", {}, mech);         // 数学坐标层（y 向上，故整体翻转）
+world.setAttribute("transform", "translate(" + OX + "," + OY + ") scale(" + S + ",-" + S + ")");
+const hud = el("g", {}, mech);           // 文字层（不翻转）
+const dynG = el("g", {}, world);         // 运动件层
+
+// 固定件层：每次参数变化时整体重建（先清空，避免节点累积）
+const staticG = el("g", {}, world);
+const hudStatic = el("g", { id: "hudTexts" }, hud);
+
+// —— 自适应倍率：保证 r、L 取任意量程组合都不出画 ——
+function updateScale() {
+  const { r, L } = P;
+  const worldRight = (L + r) + 30;                   // 导轨右端（世界坐标）
+  const worldLeft = (L - r) - 30;                    // 导轨左端
+  const worldTop = r + 20;                           // 曲柄圆最高点
+  const sx = (640 - OX - 20) / worldRight;           // 右侧可用宽度
+  const sy = (OY - 24) / worldTop;                   // 上方可用高度
+  S = Math.max(0.6, Math.min(1.5, sx, sy));
+  world.setAttribute("transform", "translate(" + OX + "," + OY + ") scale(" + S + ",-" + S + ")");
+}
+
+function rebuildStatic() {
+  const { r, L } = P;
+  const xMax = L + r, xMin = L - r;
+
+  staticG.replaceChildren();                          // 清空旧固定件（replaceChildren 清得干净）
+  hudStatic.replaceChildren();
+
+  // 曲柄轨迹圆（虚线参考）
+  el("circle", { id: "crankCircle", cx: 0, cy: 0, r: r, fill: "none", stroke: C.trace,
+    "stroke-dasharray": "4 4", "stroke-width": 1 }, staticG);
+
+  // 导轨（两条平行线），两端留出余量
+  el("line", { id: "railTop", x1: xMin - 30, y1: 26, x2: xMax + 40, y2: 26, stroke: C.rail, "stroke-width": 2 }, staticG);
+  el("line", { id: "railBottom", x1: xMin - 30, y1: -26, x2: xMax + 40, y2: -26, stroke: C.rail, "stroke-width": 2 }, staticG);
+
+  // 死点标记
+  el("circle", { cx: xMax, cy: 0, r: 4, fill: "none", stroke: C.dead,
+    "stroke-width": 1.5, "stroke-dasharray": "2 2" }, staticG);
+  el("circle", { cx: xMin, cy: 0, r: 4, fill: "none", stroke: C.dead,
+    "stroke-width": 1.5, "stroke-dasharray": "2 2" }, staticG);
+
+  // 曲柄中心支座
+  el("circle", { cx: 0, cy: 0, r: 7, fill: "#2a3550", stroke: C.muted, "stroke-width": 1.5 }, staticG);
+
+  // 静态标注（屏幕坐标）
+  el("text", { x: OX + xMax * S - 20, y: OY - 46, fill: C.dead, "font-size": 12 }, hudStatic)
+    .textContent = "外死点 θ=0";
+  el("text", { x: OX + xMin * S - 46, y: OY + 62, fill: C.dead, "font-size": 12 }, hudStatic)
+    .textContent = "内死点 θ=π";
+}
+
+// —— 运动件（每帧只改坐标 / transform） ——
+const crankLine = el("line", { id: "crank", stroke: C.crank, "stroke-width": 5, "stroke-linecap": "round" }, dynG);
+const rodLine = el("line", { id: "rod", stroke: C.rod, "stroke-width": 4, "stroke-linecap": "round" }, dynG);
+const sliderRect = el("rect", { id: "slider", width: 56, height: 48, rx: 6,
+  fill: "rgba(126,224,138,.18)", stroke: C.slider, "stroke-width": 2 }, dynG);
+const pinB = el("circle", { id: "pinA", r: 6, fill: C.crank }, dynG);   // 曲柄销（铰点 A）
+const pinC = el("circle", { id: "pinB", r: 6, fill: C.rod }, dynG);     // 十字头销（铰点 B）
+const angleArc = el("path", { id: "angleArc", fill: "none", stroke: C.arc, "stroke-width": 1.2 }, dynG);
+const thetaLabel = el("text", { fill: C.ink, "font-size": 12 }, hud);
+
+// HUD 动态文字
+const hudTheta = el("text", { id: "outTheta", x: 20, y: 30, fill: C.ink, "font-size": 14,
+  "font-family": "Consolas, monospace" }, hud);
+const hudX = el("text", { id: "outXV", x: 20, y: 52, fill: C.muted, "font-size": 13,
+  "font-family": "Consolas, monospace" }, hud);
+
+// ===================== 位移曲线图 =====================
+const plot = byId("plot");
+const plotG = el("g", {}, plot);
+const gridG = el("g", {}, plotG);        // 网格层（重建时只清这一层）
+const curvePath = el("path", { fill: "none", stroke: C.slider, "stroke-width": 2 }, plotG);
+const dotG = el("g", {}, plotG);
+const curveDot = el("circle", { r: 5, fill: C.dead }, dotG);
+const plotLabel = el("text", { x: 46, y: 20, fill: C.muted, "font-size": 12,
+  "font-family": "Consolas, monospace" }, plot);
+
+const PL = { x0: 46, x1: 386, yMid: 210 };
+function rebuildPlot() {
+  const { r, L } = P;
+  const xMax = L + r, xMin = L - r;
+  const yScale = 130 / Math.max(xMax, 1);              // 纵向自适应
+
+  gridG.replaceChildren();
+  for (let i = 0; i <= 4; i++) {
+    const gx = PL.x0 + (PL.x1 - PL.x0) * i / 4;
+    el("line", { x1: gx, y1: 40, x2: gx, y2: 380, stroke: C.grid, "stroke-width": 1 }, gridG);
+    el("text", { x: gx - 10, y: 398, fill: C.rail, "font-size": 11 }, gridG)
+      .textContent = (i * 0.5) + "π";
+  }
+  el("line", { x1: PL.x0, y1: PL.yMid, x2: PL.x1, y2: PL.yMid, stroke: C.trace, "stroke-width": 1 }, gridG);
+  // 上下限参考线（xMin / xMax）
+  for (const [v, txt] of [[xMin, "L−r"], [xMax, "L+r"]]) {
+    const y = PL.yMid - v * yScale;
+    el("line", { x1: PL.x0, y1: y, x2: PL.x1, y2: y, stroke: "#1f2a40", "stroke-width": 1,
+      "stroke-dasharray": "2 4" }, gridG);
+    el("text", { x: PL.x0 - 42, y: y + 4, fill: C.rail, "font-size": 10 }, gridG).textContent = txt;
+  }
+
+  let d = "";
+  const N = 240;
+  for (let i = 0; i <= N; i++) {
+    const th = 2 * Math.PI * i / N;
+    const { x } = sliderX(r, L, th);
+    const px = PL.x0 + (PL.x1 - PL.x0) * i / N;
+    const py = PL.yMid - x * yScale;
+    d += (i === 0 ? "M" : "L") + px.toFixed(1) + "," + py.toFixed(1);
+  }
+  curvePath.setAttribute("d", d);
+  PL.yScale = yScale;
+}
+
+// ===================== 每帧渲染 =====================
+function render() {
+  const { r, L, w } = P;
+  const { feasible, x } = sliderX(r, L, theta);
+  if (!feasible) return;
+
+  // 铰点 A：曲柄端点
+  const ax = r * Math.cos(theta), ay = r * Math.sin(theta);
+  // 铰点 B：由唯一公式给出，必在导轨 y = 0 上
+  const bx = x, by = 0;
+
+  crankLine.setAttribute("x1", 0); crankLine.setAttribute("y1", 0);
+  crankLine.setAttribute("x2", ax.toFixed(3)); crankLine.setAttribute("y2", ay.toFixed(3));
+  // 连杆两端分别钉在 A、B 上 —— 这是原版的错处：它用了 r·cosθ + L
+  rodLine.setAttribute("x1", ax.toFixed(3)); rodLine.setAttribute("y1", ay.toFixed(3));
+  rodLine.setAttribute("x2", bx.toFixed(3)); rodLine.setAttribute("y2", by.toFixed(3));
+  pinB.setAttribute("cx", ax.toFixed(3)); pinB.setAttribute("cy", ay.toFixed(3));
+  pinC.setAttribute("cx", bx.toFixed(3)); pinC.setAttribute("cy", by.toFixed(3));
+  sliderRect.setAttribute("x", (bx - 28).toFixed(3));
+  sliderRect.setAttribute("y", -24);
+
+  // θ 角弧：θ≈0 时 A 命令会退化成空路径，此时清空 d
+  const a = ((theta % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+  const R = 24;
+  if (a < 1e-6) {
+    angleArc.setAttribute("d", "");
+  } else {
+    const ax2 = R * Math.cos(a), ay2 = R * Math.sin(a);
+    angleArc.setAttribute("d",
+      "M " + R + ",0 A " + R + "," + R + " 0 " + (a > Math.PI ? 1 : 0) + " 1 " + ax2.toFixed(2) + "," + ay2.toFixed(2));
+  }
+  thetaLabel.setAttribute("x", OX + 34 * S * Math.cos(a / 2));
+  thetaLabel.setAttribute("y", OY - 34 * S * Math.sin(a / 2) + 4);
+  thetaLabel.textContent = "θ";
+
+  // HUD：角度制 + 弧度制 + 位移 + 速度
+  const deg = a * 180 / Math.PI;
+  hudTheta.textContent = "θ = " + deg.toFixed(1) + "°  (" + a.toFixed(3) + " rad)";
+  hudX.textContent = "x = " + x.toFixed(1) + " mm   v = " + (w * sliderVx(r, L, theta)).toFixed(1) + " mm/s";
+
+  // 曲线动点
+  dotG.setAttribute("transform",
+    "translate(" + (PL.x0 + (PL.x1 - PL.x0) * a / (2 * Math.PI)).toFixed(2) + ", " +
+    (PL.yMid - x * PL.yScale).toFixed(2) + ")");
+  plotLabel.textContent = "x(θ=" + a.toFixed(2) + ") = " + x.toFixed(1) + " mm";
+}
+
+// ===================== 主循环（按真实时间积分） =====================
+function tick(now) {
+  if (lastT === null) lastT = now;                   // 首帧只对时
+  const dt = Math.min((now - lastT) / 1000, MAX_DT);
+  lastT = now;
+  if (running) {
+    theta += P.w * dt;                               // 原版写死 theta += 0.02，导致转速随帧率漂移且 ω 无效
+    if (theta > 1e6) theta -= 1e6;                   // 长期运行的数值保护
+  }
+  render();
+  requestAnimationFrame(tick);
+}
+
+// ===================== 控件与约束 =====================
+const $ = byId;
+function clampParams(from) {
+  // 约束是 r ≤ L − 5；把 r 往上推会破坏装配，故夹紧 r（而不是悄悄改大 L）
+  let note = "";
+  if (P.r > P.L - MIN_CLEARANCE) {
+    const rCapped = Math.max(10, P.L - MIN_CLEARANCE);
+    note = "⚠ 装配约束 L ≥ r + 5：r 已由 " + P.r + " 夹紧到 " + rCapped + " mm（L=" + P.L + "）";
+    P.r = rCapped;
+    $("inpR").value = String(P.r);
+  }
+  if (from === "L" && P.L < P.r + MIN_CLEARANCE) {
+    const lMin = Math.min(160, P.r + MIN_CLEARANCE);
+    note = "⚠ 装配约束 L ≥ r + 5：L 已由 " + P.L + " 夹紧到 " + lMin + " mm（r=" + P.r + "）";
+    P.L = lMin;
+    $("inpL").value = String(P.L);
+  }
+  $("outR").textContent = P.r + " mm";
+  $("outL").textContent = P.L + " mm";
+  $("warnMsg").textContent = note;
+}
+function refreshAll() {
+  updateScale();                                   // 先定倍率，再按倍率重建标注
+  rebuildStatic();
+  rebuildPlot();
+  render();
+}
+$("inpR").addEventListener("input", (e) => {
+  P.r = +e.target.value;
+  clampParams("r");
+  refreshAll();
+});
+$("inpL").addEventListener("input", (e) => {
+  P.L = +e.target.value;
+  clampParams("L");
+  refreshAll();
+});
+$("inpW").addEventListener("input", (e) => {
+  P.w = +e.target.value;
+  $("outW").textContent = P.w.toFixed(1) + " rad/s";
+  render();
+});
+$("btnPlay").addEventListener("click", () => {
+  running = !running;
+  lastT = null;                                      // 恢复时重新对时，避免一次跳变
+  $("btnPlay").textContent = running ? "⏸ 暂停" : "▶ 播放";
+});
+$("btnReset").addEventListener("click", () => { theta = 0; render(); });
+
+// ===================== 启动 =====================
+$("outR").textContent = P.r + " mm";
+$("outL").textContent = P.L + " mm";
+$("outW").textContent = P.w.toFixed(1) + " rad/s";
+updateScale();
+rebuildStatic();
+rebuildPlot();
+render();
+requestAnimationFrame(tick);
+
+})();
+</script>
+</body>
+</html>
